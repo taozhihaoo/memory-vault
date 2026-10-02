@@ -171,6 +171,8 @@ out to a model. Plug in a local model runner (e.g. ONNX) by implementing
 | Option | Default | Meaning |
 |--------|---------|---------|
 | `MEMORYVAULT_HOME` | `~/.memoryvault` | Directory holding `memoryvault.db` |
+| `MEMORYVAULT_API_HOST` | `127.0.0.1` | Bind address for `serve` (containers use `0.0.0.0`) |
+| `MEMORYVAULT_API_PORT` | `8000` | Port for `serve` |
 | `--db PATH` | — | Explicit vault file location |
 | `max_file_size` | 64 MiB | Files above are skipped |
 | `simhash_threshold` | 12 | Hamming distance for near-duplicates |

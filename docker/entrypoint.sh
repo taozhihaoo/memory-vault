@@ -20,8 +20,12 @@ case "$1" in
     serve)
         # Index the mounted documents once at startup, then serve the API
         # with the bundled dashboard. All state stays in $DATA_DIR.
+        # --host is mandatory: the server must bind 0.0.0.0 (not container
+        # loopback) or the published port is unreachable from outside.
         memoryvault --db "$DB" index "$DOCS_DIR" || true
-        exec memoryvault --db "$DB" serve
+        exec memoryvault --db "$DB" serve \
+            --host "${MEMORYVAULT_API_HOST:-0.0.0.0}" \
+            --port "${MEMORYVAULT_API_PORT:-8000}"
         ;;
     index|search|stats|watch|graph|timeline|duplicates|tags|show|scan)
         exec memoryvault --db "$DB" "$@"

@@ -21,6 +21,20 @@ def _default_home() -> Path:
     return Path.home() / ".memoryvault"
 
 
+def _default_api_host() -> str:
+    # Containers must bind 0.0.0.0 to be reachable through the published
+    # port; a bare 127.0.0.1 default would make `docker run -p` unreachably
+    # reset every connection.
+    return os.environ.get("MEMORYVAULT_API_HOST", "127.0.0.1")
+
+
+def _default_api_port() -> int:
+    try:
+        return int(os.environ.get("MEMORYVAULT_API_PORT", "8000"))
+    except ValueError:
+        return 8000
+
+
 @dataclass
 class VaultConfig:
     """Configuration for one MemoryVault vault.
@@ -63,9 +77,10 @@ class VaultConfig:
     #: Seconds to wait for file-system events to settle before re-indexing.
     watcher_debounce_seconds: float = 1.0
 
-    #: Host/port for the API server.
-    api_host: str = "127.0.0.1"
-    api_port: int = 8000
+    #: Host/port for the API server. Overridable via MEMORYVAULT_API_HOST
+    #: and MEMORYVAULT_API_PORT environment variables.
+    api_host: str = field(default_factory=_default_api_host)
+    api_port: int = field(default_factory=_default_api_port)
 
     #: Directory containing an optional built frontend (frontend/dist).
     frontend_dist: Path | None = None

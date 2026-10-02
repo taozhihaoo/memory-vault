@@ -56,6 +56,29 @@ def test_config_memoryvault_home_env(tmp_path, monkeypatch):
     assert VaultConfig().db_path == tmp_path / "custom" / "memoryvault.db"
 
 
+def test_config_api_env_vars(monkeypatch):
+    # Containers rely on these to bind 0.0.0.0 — a loopback-only default
+    # makes `docker run -p` unreachable (connection reset).
+    monkeypatch.setenv("MEMORYVAULT_API_HOST", "0.0.0.0")
+    monkeypatch.setenv("MEMORYVAULT_API_PORT", "9000")
+    cfg = VaultConfig()
+    assert cfg.api_host == "0.0.0.0"
+    assert cfg.api_port == 9000
+
+
+def test_config_api_env_defaults(monkeypatch):
+    monkeypatch.delenv("MEMORYVAULT_API_HOST", raising=False)
+    monkeypatch.delenv("MEMORYVAULT_API_PORT", raising=False)
+    cfg = VaultConfig()
+    assert cfg.api_host == "127.0.0.1"
+    assert cfg.api_port == 8000
+
+
+def test_config_api_env_invalid_port_falls_back(monkeypatch):
+    monkeypatch.setenv("MEMORYVAULT_API_PORT", "not-a-number")
+    assert VaultConfig().api_port == 8000
+
+
 def test_simhash_threshold_flows_into_vault(docs_dir: Path):
     vault = Vault.in_memory(simhash_threshold=3)
     assert vault.dedup.threshold == 3

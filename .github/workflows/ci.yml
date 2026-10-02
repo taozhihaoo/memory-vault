@@ -73,10 +73,18 @@ jobs:
         run: |
           docker run -d --name mv -p 8000:8000 \
             -v "$PWD/examples/sample-docs:/docs:ro" memoryvault:ci
-          for i in $(seq 1 20); do
-            if curl -fsS http://127.0.0.1:8000/api/health > /dev/null; then break; fi
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/api/health > /dev/null 2>&1; then ok=1; break; fi
             sleep 2
           done
+          if [ "$ok" != "1" ]; then
+            echo "::error::container never became healthy — container logs:"
+            docker logs --tail 100 mv
+            docker ps -a --filter name=mv
+            docker rm -f mv > /dev/null || true
+            exit 1
+          fi
           curl -fsS http://127.0.0.1:8000/api/health | grep -q '"status":"ok"'
           curl -fsS "http://127.0.0.1:8000/api/search?q=quantum" | grep -q '"total"'
           docker rm -f mv > /dev/null
