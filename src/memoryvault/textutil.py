@@ -1,0 +1,38 @@
+"""Shared text utilities used by parsers and the indexer."""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+
+_WORD_RE = re.compile(r"\b[\w']+\b", re.UNICODE)
+
+_FALLBACK_ENCODINGS = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
+
+
+def decode_bytes(raw: bytes) -> str:
+    """Decode bytes to text, trying UTF-8 first then common fallbacks.
+
+    A UTF-16 BOM is also honoured so Windows-exported files decode cleanly.
+    """
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16")
+    for enc in _FALLBACK_ENCODINGS:
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def count_words(text: str) -> int:
+    """Deterministic word count (whitespace/punctuation independent)."""
+    return len(_WORD_RE.findall(text))
+
+
+def normalize_whitespace(text: str) -> str:
+    return re.sub(r"[ \t]+", " ", re.sub(r"\r\n?", "\n", text)).strip()
+
+
+def strip_controls(text: str) -> str:
+    return "".join(ch for ch in text if ch == "\n" or not unicodedata.category(ch).startswith("C"))
