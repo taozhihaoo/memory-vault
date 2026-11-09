@@ -8,7 +8,7 @@ HTTP surface. Everything below runs on one machine with no network egress.
 ```mermaid
 flowchart TB
     subgraph FS["File system"]
-        F["TXT · MD · PDF · DOCX · HTML · JSON · CSV"]
+        F["TXT · LOG · MD · PDF · DOCX<br/>HTML · JSON · CSV · TSV"]
     end
 
     subgraph Scanner["Incremental scanner"]
@@ -97,7 +97,13 @@ User queries are translated, never concatenated raw, into FTS5 `MATCH`
 expressions: bare words become quoted prefix terms (`"hello"*`), quotes mark
 phrases, `-term` becomes `NOT`, uppercase `OR` is honored. Malformed or
 hostile input degrades to a quoted literal — it cannot break out of the
-grammar.
+grammar. Exclusion-only queries use a set-difference SQL path because FTS5's
+`NOT` is a binary operator.
+
+Highlighting inserts private sentinel characters around matches, HTML-escapes
+the document text, and only then swaps the sentinels for `<mark>` tags. The
+frontend renders those as React text nodes — document HTML is never injected
+into the DOM.
 
 ### Duplicates without pairwise scans at scale
 
@@ -115,7 +121,23 @@ is bounded by configurable caps (topics per document, tag co-occurrence).
 
 The FastAPI app binds `127.0.0.1` by default, serves the prebuilt React
 bundle as static files (SPA fallback), and exists only for convenience —
-the CLI uses the same Python interfaces directly.
+the CLI uses the same Python interfaces directly. CORS is limited to
+loopback origins, static paths are resolved inside the bundle only, and
+unknown `/api/*` routes return JSON 404s.
+
+### One locked connection, many threads
+
+FastAPI runs synchronous endpoints in a thread pool but the vault uses a
+single SQLite connection. `LockedConnection` serializes every statement and
+materialises its rows before releasing the lock, so two requests can never
+consume each other's cursor. Schema changes are applied as versioned
+in-place migrations (`schema_meta.schema_version`, currently 2).
+
+### The dashboard is bilingual and self-contained
+
+Both UI dictionaries live in `frontend/src/i18n.js`; switching language
+never touches the network. All fonts, icons and chart rendering are local —
+no CDN, no web font, no analytics.
 
 ## Extension points
 
