@@ -1,142 +1,157 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, fmtBytes, fmtNumber } from "../api.js";
+import { api, fmtBytes, fmtDate, fmtNumber } from "../api.js";
+import { useI18n } from "../locale.jsx";
+import {
+  Card, CardHeading, ErrorBox, Icon, LoadingState, PageHeader, StatCard, TypeBadge,
+} from "../components.jsx";
 
 export default function DashboardPage() {
+  const { lang, t } = useI18n();
   const [stats, setStats] = useState(null);
   const [tags, setTags] = useState([]);
   const [dups, setDups] = useState(null);
   const [docs, setDocs] = useState([]);
   const [scanning, setScanning] = useState(false);
+  const [error, setError] = useState(null);
 
-  useEffect(() => {
-    api.stats().then(setStats).catch(() => {});
-    api.tags().then(setTags).catch(() => {});
-    api.duplicates().then(setDups).catch(() => {});
-    api.documents({ limit: 10 }).then((d) => setDocs(d.documents)).catch(() => {});
+  const load = useCallback(() => {
+    api.stats().then(setStats).catch((e) => setError(e.message));
+    api.tags().then(setTags).catch(() => setTags([]));
+    api.duplicates().then(setDups).catch(() => setDups(null));
+    api.documents({ limit: 10 })
+      .then((d) => setDocs(d.documents ?? []))
+      .catch(() => setDocs([]));
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   async function rescan() {
     setScanning(true);
     try {
       await api.scan(null);
-      setStats(await api.stats());
-    } catch {
-      /* watch paths may not be configured */
+      await load();
+    } catch (e) {
+      setError(e.message);
     } finally {
       setScanning(false);
     }
   }
 
-  if (!stats) return <div className="empty">Loading vault…</div>;
+  if (!stats) {
+    return (
+      <div className="page">
+        <PageHeader eyebrow={t("dashboard.eyebrow")} title={t("dashboard.title")} subtitle={t("dashboard.subtitle")} />
+        {error ? <ErrorBox message={error} onRetry={load} retryLabel={t("common.retry")} /> : <LoadingState label={t("dashboard.loading")} />}
+      </div>
+    );
+  }
+
+  const contentTypes = stats.content_types ?? {};
+  const maxType = Math.max(1, ...Object.values(contentTypes));
+  const exact = dups?.exact ?? [];
+  const similar = dups?.similar ?? [];
 
   return (
-    <div className="page dashboard">
-      <h2>Vault overview</h2>
+    <div className="page dashboard-page">
+      <PageHeader
+        eyebrow={t("dashboard.eyebrow")}
+        title={t("dashboard.title")}
+        subtitle={t("dashboard.subtitle")}
+        action={
+          <button className="btn primary" onClick={rescan} disabled={scanning}>
+            {scanning ? <span className="spinner light" /> : <Icon name="refresh" size={15} />}
+            {scanning ? t("dashboard.scanning") : t("dashboard.rescan")}
+          </button>
+        }
+      />
+
+      {error && <ErrorBox message={error} onRetry={load} retryLabel={t("common.retry")} />}
+
       <div className="stat-grid">
-        <div className="stat-card">
-          <div className="stat-number">{fmtNumber(stats.documents)}</div>
-          <div className="muted">documents</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-number">{fmtNumber(stats.words)}</div>
-          <div className="muted">words</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-number">{fmtBytes(stats.bytes)}</div>
-          <div className="muted">raw text</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-number">{fmtNumber(stats.tags)}</div>
-          <div className="muted">tags & topics</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-number">{fmtNumber(stats.events)}</div>
-          <div className="muted">timeline events</div>
-        </div>
+        <StatCard icon="document" tone="indigo" label={t("dashboard.statDocuments")} value={fmtNumber(stats.documents, lang)} />
+        <StatCard icon="hash" tone="cyan" label={t("dashboard.statWords")} value={fmtNumber(stats.words, lang)} />
+        <StatCard icon="database" tone="violet" label={t("dashboard.statBytes")} value={fmtBytes(stats.bytes)} />
+        <StatCard icon="tag" tone="amber" label={t("dashboard.statTags")} value={fmtNumber(stats.tags, lang)} />
+        <StatCard icon="timeline" tone="green" label={t("dashboard.statEvents")} value={fmtNumber(stats.events, lang)} />
       </div>
 
       <div className="dash-columns">
-        <section className="chart-card">
-          <h3>Content types</h3>
-          {Object.entries(stats.content_types).map(([type, n]) => (
-            <div className="type-row" key={type}>
-              <span className="type-name">{type}</span>
-              <div className="type-bar">
-                <div
-                  className="type-fill"
-                  style={{ width: `${(n / stats.documents) * 100}%` }}
-                />
-              </div>
-              <span className="muted">{n}</span>
+        <Card className="card-types">
+          <CardHeading icon="layers" title={t("dashboard.contentTypes")} />
+          {Object.entries(contentTypes).length === 0 ? (
+            <div className="inline-empty">
+              {t("dashboard.emptyVault")} <code>memoryvault index &lt;dir&gt;</code> {t("dashboard.emptyVaultEnd")}
+            </div>
+          ) : (
+            <div className="type-list">
+              {Object.entries(contentTypes).map(([type, n]) => (
+                <div className="type-row" key={type}>
+                  <span className="type-name">{type}</span>
+                  <div className="type-bar">
+                    <div className="type-fill" style={{ width: `${(n / maxType) * 100}%` }} />
+                  </div>
+                  <span className="type-count">{fmtNumber(n, lang)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card className="card-tags">
+          <CardHeading icon="tag" title={t("dashboard.topTags")} />
+          {tags.length === 0 ? (
+            <div className="inline-empty">{t("dashboard.noTags")}</div>
+          ) : (
+            <div className="tag-cloud">
+              {tags.slice(0, 16).map((tag) => (
+                <Link key={tag.name} to={`/?tag=${encodeURIComponent(tag.name)}`} className="tag-chip">
+                  {tag.name}<span>{fmtNumber(tag.document_count, lang)}</span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card className="card-dups">
+          <CardHeading icon="copy" title={t("dashboard.duplicates")} />
+          <div className="dup-summary">
+            <div><strong>{fmtNumber(exact.length, lang)}</strong><span>{t("dashboard.exact")}</span></div>
+            <div><strong>{fmtNumber(similar.length, lang)}</strong><span>{t("dashboard.near")}</span></div>
+          </div>
+          {[...exact.slice(0, 3), ...similar.slice(0, 3)].map((group, i) => (
+            <div className="dup-line" key={`${group.kind}-${i}`}>
+              <span className={`dup-dot ${group.kind}`} />
+              {group.document_ids.map((id) => (
+                <Link to={`/doc/${id}`} key={id}>#{id}</Link>
+              ))}
+              {group.similarity != null && (
+                <span className="dup-pct">{Math.round(group.similarity * 100)}%</span>
+              )}
             </div>
           ))}
-          {Object.keys(stats.content_types).length === 0 && (
-            <div className="muted">
-              Vault is empty — run <code>memoryvault index &lt;dir&gt;</code> first.
-            </div>
+          {exact.length === 0 && similar.length === 0 && (
+            <div className="inline-empty">{t("dashboard.noDuplicates")}</div>
           )}
-        </section>
-
-        <section className="chart-card">
-          <h3>Top tags</h3>
-          <div className="tag-cloud">
-            {tags.slice(0, 15).map((t) => (
-              <Link key={t.name} to={`/?tag=${t.name}`} className="chip">
-                {t.name} <span className="chip-count">{t.document_count}</span>
-              </Link>
-            ))}
-            {tags.length === 0 && <span className="muted">No tags yet.</span>}
-          </div>
-        </section>
-
-        <section className="chart-card">
-          <h3>Duplicates</h3>
-          {dups && (
-            <>
-              <div className="dup-line">
-                {dups.exact.length} exact · {dups.similar.length} near-duplicate group(s)
-              </div>
-              {dups.exact.slice(0, 5).map((g, i) => (
-                <div className="dup-line muted" key={`e${i}`}>
-                  exact: {g.document_ids.map((id) => (
-                    <Link to={`/doc/${id}`} key={id}>#{id} </Link>
-                  ))}
-                </div>
-              ))}
-              {dups.similar.slice(0, 5).map((g, i) => (
-                <div className="dup-line muted" key={`s${i}`}>
-                  ~{Math.round((g.similarity ?? 0) * 100)}%: {g.document_ids.map((id) => (
-                    <Link to={`/doc/${id}`} key={id}>#{id} </Link>
-                  ))}
-                </div>
-              ))}
-              {dups.exact.length === 0 && dups.similar.length === 0 && (
-                <div className="muted">No duplicates detected.</div>
-              )}
-            </>
-          )}
-        </section>
+        </Card>
       </div>
 
-      <section className="chart-card">
-        <div className="recent-head">
-          <h3>Recently modified</h3>
-          <button className="btn" onClick={rescan} disabled={scanning}>
-            {scanning ? "Scanning…" : "Re-scan vault"}
-          </button>
-        </div>
+      <Card className="card-recent">
+        <CardHeading icon="clock" title={t("dashboard.recent")} />
         <ul className="doc-rows">
-          {docs.map((d) => (
-            <li key={d.id}>
-              <Link to={`/doc/${d.id}`} className="doc-row-title">{d.title}</Link>
-              <span className="muted doc-row-path">{d.path}</span>
-              <span className="type-badge">{d.content_type}</span>
+          {docs.map((doc) => (
+            <li key={doc.id}>
+              <span className="doc-row-icon"><Icon name="document" size={16} /></span>
+              <Link to={`/doc/${doc.id}`} className="doc-row-title">{doc.title}</Link>
+              <span className="doc-row-path" title={doc.path}>{doc.path}</span>
+              <TypeBadge type={doc.content_type} />
+              <span className="doc-row-time">{fmtDate(doc.modified_at, lang)}</span>
+              <Icon name="arrowRight" size={15} className="doc-row-arrow" />
             </li>
           ))}
-          {docs.length === 0 && <li className="muted">No documents indexed yet.</li>}
+          {docs.length === 0 && <li className="inline-empty">{t("dashboard.noDocs")}</li>}
         </ul>
-      </section>
+      </Card>
     </div>
   );
 }
