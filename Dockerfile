@@ -1,8 +1,8 @@
 # ---------- Stage 1: build the React dashboard ----------
-FROM node:22-alpine AS frontend-build
+FROM node:22-slim AS frontend-build
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 

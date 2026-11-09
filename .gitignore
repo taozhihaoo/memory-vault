@@ -30,3 +30,6 @@ uploads/
 *.swp
 .DS_Store
 Thumbs.db
+
+# WorkBuddy workspace data (local notes, not project source)
+.workbuddy/
