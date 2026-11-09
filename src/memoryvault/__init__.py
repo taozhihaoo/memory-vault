@@ -6,7 +6,7 @@ requires no AI; AI capabilities are an optional plugin layer
 (see :mod:`memoryvault.ai`).
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from memoryvault.config import VaultConfig
 from memoryvault.vault import Vault

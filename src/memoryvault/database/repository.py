@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -232,6 +232,17 @@ class DocumentRepository:
     def normalize_path(path: str | Path) -> str:
         return str(Path(path).resolve()).replace("\\", "/")
 
+    @staticmethod
+    def is_within(path: str, root: str | Path) -> bool:
+        """True when *path* is *root* itself or a descendant of it.
+
+        A plain ``startswith`` treats ``/docs-archive`` as part of ``/docs``,
+        which used to delete unrelated documents during an incremental scan.
+        """
+        prefix = str(Path(root).resolve()).replace("\\", "/").rstrip("/")
+        normalized = path.replace("\\", "/")
+        return normalized == prefix or normalized.startswith(prefix + "/")
+
     # ---------------------------------------------------------------- tags
     def ensure_tag(self, name: str) -> int:
         name = name.strip().lower()
@@ -275,8 +286,11 @@ class DocumentRepository:
         return self.tags_for(document_id, source="topic")
 
     def list_tags(self) -> list[dict[str, Any]]:
+        # A tag may be attached both explicitly (source='tag') and as an
+        # auto-extracted topic (source='topic') for the same document. Count
+        # distinct documents so the UI never reports inflated usage.
         rows = self.conn.execute(
-            "SELECT t.id, t.name, COUNT(dt.document_id) AS document_count"
+            "SELECT t.id, t.name, COUNT(DISTINCT dt.document_id) AS document_count"
             " FROM tags t LEFT JOIN document_tags dt ON dt.tag_id = t.id"
             " GROUP BY t.id ORDER BY document_count DESC, t.name"
         ).fetchall()
@@ -345,24 +359,45 @@ class DocumentRepository:
             for r in rows
         ]
 
+    def count_events(self, *, event_type: str | None = None) -> int:
+        """Number of timeline events (not documents)."""
+        if event_type:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM document_events WHERE event_type = ?",
+                (event_type,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM document_events"
+            ).fetchone()
+        return int(row["n"])
+
     def activity_histogram(self, days: int = 30) -> list[dict[str, Any]]:
-        """Per-day event counts for the last *days* days."""
+        """Per-day event counts for the last *days* calendar days.
+
+        Previously this sliced the last N *buckets*, which silently included
+        arbitrarily old activity when the vault had only a few busy days.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max(1, days) - 1)
+        ).strftime("%Y-%m-%d")
         rows = self.conn.execute(
             """
             SELECT substr(occurred_at, 1, 10) AS day, event_type, COUNT(*) AS n
             FROM document_events
+            WHERE substr(occurred_at, 1, 10) >= ?
             GROUP BY day, event_type
             ORDER BY day
-            """
+            """,
+            (cutoff,),
         ).fetchall()
         by_day: dict[str, dict[str, int]] = {}
         for r in rows:
             by_day.setdefault(r["day"], {})[r["event_type"]] = r["n"]
-        out = [
+        return [
             {"date": day, "counts": counts, "total": sum(counts.values())}
             for day, counts in sorted(by_day.items())
         ]
-        return out[-days:]
 
     # --------------------------------------------------------- simhash bands
     def store_bands(self, document_id: int, simhash: int, bands: int = 4) -> None:
@@ -419,12 +454,11 @@ class DocumentRepository:
         existing = self.get_by_path(doc.path, include_deleted=True)
         doc.path = self.normalize_path(doc.path)
         if existing and existing.sha256 == doc.sha256 and not existing.deleted:
-            if doc.tags or doc.topics:
-                if doc.tags:
-                    self.set_tags(existing.id, doc.tags, source="tag")
-                if doc.topics:
-                    self.set_tags(existing.id, doc.topics, source="topic")
-                self.conn.commit()
+            # Tags/topics are derived data: always resync them, including the
+            # empty case, otherwise stale terms survive a metadata edit.
+            self.set_tags(existing.id, doc.tags, source="tag")
+            self.set_tags(existing.id, doc.topics, source="topic")
+            self.conn.commit()
             return existing, "unchanged"
 
         if doc.indexed_at == "":
@@ -471,10 +505,8 @@ class DocumentRepository:
         self.fts_replace(doc.id, doc.title, doc.content)
         if doc.simhash is not None:
             self.store_bands(doc.id, int(doc.simhash, 16))
-        if doc.tags:
-            self.set_tags(doc.id, doc.tags, source="tag")
-        if doc.topics:
-            self.set_tags(doc.id, doc.topics, source="topic")
+        self.set_tags(doc.id, doc.tags, source="tag")
+        self.set_tags(doc.id, doc.topics, source="topic")
         self.add_event(
             document_id=doc.id,
             path=doc.path,

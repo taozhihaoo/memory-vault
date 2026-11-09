@@ -2,6 +2,12 @@
 
 Topics/keywords are derived without any AI component so the graph builder
 and auto-tagging stay fully offline and reproducible.
+
+CJK text has no whitespace word boundaries. Instead of slicing arbitrary
+fixed-width chunks (which produced nonsense "topics" such as ``不与任何``),
+we only consider two-character phrases at the *edges* of a CJK run — those
+are almost always real words at a clause boundary — and require the phrase
+to occur more than once in the document.
 """
 
 from __future__ import annotations
@@ -9,7 +15,15 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-_WORD_RE = re.compile(r"[a-zA-Z][\w'-]*|[\u4e00-\u9fff]{1,4}", re.UNICODE)
+_LATIN_RE = re.compile(r"[a-zA-Z][\w'-]*")
+_CJK_RUN_RE = re.compile(r"[\u3400-\u9fff]+")
+
+#: Characters that never start/end a meaningful Chinese keyword.
+_CJK_FUNCTION_CHARS = frozenset(
+    "的了和与在是之为以及对其这那些个们很更最都就还又等后时上下内外"
+    "并或而被把让使于由且不但如若因而所以可以一些每种各不无也字中及"
+    "一二三四五六七八九十第将已会将能可会对于把从到让使把被给向"
+)
 
 #: Compact English stopword list (deterministic, no external data files).
 STOPWORDS = frozenset(
@@ -31,6 +45,7 @@ STOPWORDS = frozenset(
 )
 
 _MIN_TOKEN_LEN = 3
+_MIN_CJK_FREQUENCY = 2
 
 
 def extract_keywords(text: str, *, limit: int = 8) -> list[str]:
@@ -39,10 +54,23 @@ def extract_keywords(text: str, *, limit: int = 8) -> list[str]:
     Deterministic: ties are broken alphabetically.
     """
     counts: Counter[str] = Counter()
-    for token in _WORD_RE.findall(text):
+    for token in _LATIN_RE.findall(text):
         token = token.lower().strip("'-")
         if len(token) < _MIN_TOKEN_LEN or token in STOPWORDS:
             continue
         counts[token] += 1
+
+    cjk: Counter[str] = Counter()
+    for run in _CJK_RUN_RE.findall(text):
+        if len(run) < 2:
+            continue
+        for phrase in {run[:2], run[-2:]}:
+            if phrase[0] in _CJK_FUNCTION_CHARS or phrase[1] in _CJK_FUNCTION_CHARS:
+                continue
+            cjk[phrase] += 1
+    for phrase, frequency in cjk.items():
+        if frequency >= _MIN_CJK_FREQUENCY:
+            counts[phrase] += frequency
+
     ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     return [token for token, _ in ranked[:limit]]

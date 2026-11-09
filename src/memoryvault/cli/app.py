@@ -104,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
 def _cmd_index(args, config: VaultConfig) -> int:
     config.watch_paths = [Path(args.path)]
     with Vault(config) as vault:
+        vault.scanner.remember_roots([Path(args.path)])
         started = time.perf_counter()
         stats = vault.scanner.scan(roots=[Path(args.path)])
         elapsed = time.perf_counter() - started
@@ -119,12 +120,17 @@ def _cmd_index(args, config: VaultConfig) -> int:
 
 
 def _cmd_scan(args, config: VaultConfig) -> int:
-    roots = [Path(p) for p in args.paths] or list(config.watch_paths)
-    if not roots:
-        print("no watch paths configured; pass directories to scan", file=sys.stderr)
-        return 2
+    explicit = [Path(p) for p in args.paths]
     with Vault(config) as vault:
-        stats = vault.scanner.scan(roots=roots)
+        if explicit:
+            vault.scanner.remember_roots(explicit)
+        else:
+            remembered = vault.scanner.remembered_roots()
+            vault.config.watch_paths = vault.config.watch_paths or remembered
+        if not vault.config.watch_paths and not explicit:
+            print("no watch paths configured; pass directories to scan", file=sys.stderr)
+            return 2
+        stats = vault.scanner.scan(roots=explicit or None)
     if args.json:
         print(json.dumps(stats.to_dict()))
     else:
@@ -135,7 +141,8 @@ def _cmd_scan(args, config: VaultConfig) -> int:
 def _cmd_watch(args, config: VaultConfig) -> int:
     config.watch_paths = [Path(p) for p in args.paths]
     with Vault(config) as vault:
-        print(f"watching {len(config.watch_paths)} path(s) — Ctrl+C to stop")
+        vault.scanner.remember_roots(vault.config.watch_paths)
+        print(f"watching {len(vault.config.watch_paths)} path(s) — Ctrl+C to stop")
         for root in config.watch_paths:
             stats = vault.scanner.scan(roots=[root])
             print(

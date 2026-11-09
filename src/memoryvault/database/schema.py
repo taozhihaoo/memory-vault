@@ -1,10 +1,12 @@
-"""Database schema (versioned, idempotent)."""
+"""Database schema (versioned, idempotent, upgradeable)."""
 
 from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+#: v2 — ``document_tags`` primary key includes ``source`` so one term can be
+#: both an explicit tag and an auto-extracted topic on the same document.
+SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -44,7 +46,7 @@ CREATE TABLE IF NOT EXISTS document_tags (
     document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     tag_id      INTEGER NOT NULL REFERENCES tags(id)      ON DELETE CASCADE,
     source      TEXT    NOT NULL DEFAULT 'auto',
-    PRIMARY KEY (document_id, tag_id)
+    PRIMARY KEY (document_id, tag_id, source)
 );
 
 CREATE INDEX IF NOT EXISTS idx_document_tags_tag ON document_tags(tag_id);
@@ -73,7 +75,7 @@ CREATE TABLE IF NOT EXISTS simhash_bands (
 
 CREATE INDEX IF NOT EXISTS idx_bands_value ON simhash_bands(band_index, band_value);
 
--- ----------------------------------------------------------------- settings
+-- --------------------------------------------------------------- settings
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -90,9 +92,39 @@ CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
 );
 """
 
+_V2_MIGRATION = """
+-- v1 used PRIMARY KEY (document_id, tag_id), which silently discarded a
+-- topic whenever the same word was also an explicit tag. Rebuild the link
+-- table with source as part of the key; all existing rows are preserved.
+CREATE TABLE IF NOT EXISTS document_tags_v2 (
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    tag_id      INTEGER NOT NULL REFERENCES tags(id)      ON DELETE CASCADE,
+    source      TEXT    NOT NULL DEFAULT 'auto',
+    PRIMARY KEY (document_id, tag_id, source)
+);
+INSERT OR IGNORE INTO document_tags_v2 (document_id, tag_id, source)
+    SELECT document_id, tag_id, source FROM document_tags;
+DROP TABLE document_tags;
+ALTER TABLE document_tags_v2 RENAME TO document_tags;
+CREATE INDEX IF NOT EXISTS idx_document_tags_tag ON document_tags(tag_id);
+"""
+
+
+def _upgrade(conn: sqlite3.Connection, from_version: int) -> None:
+    """Apply forward migrations for vaults created by older releases."""
+    if from_version < 2:
+        # Rebuilding a link table requires temporarily relaxing FK checks:
+        # legacy vaults may contain rows whose parents were pruned.
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            conn.executescript(_V2_MIGRATION)
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.commit()
+
 
 def apply_schema(conn: sqlite3.Connection) -> None:
-    """Create all tables if they do not exist and record the schema version."""
+    """Create/upgrade every table and record the current schema version."""
     conn.executescript(_SCHEMA_SQL)
     conn.executescript(_FTS_SQL)
     row = conn.execute(
@@ -103,4 +135,12 @@ def apply_schema(conn: sqlite3.Connection) -> None:
             "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+    else:
+        current = int(row["value"])
+        if current < SCHEMA_VERSION:
+            _upgrade(conn, current)
+            conn.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
     conn.commit()

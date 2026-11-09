@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -55,11 +56,24 @@ def create_app(
         version=__version__,
         lifespan=lifespan,
     )
+    # The API is bound to loopback and holds the user's private documents.
+    # ``allow_origins=["*"]`` let *any* website in the browser read the whole
+    # vault; restrict cross-origin access to local dev origins (or an
+    # explicit allow-list) instead.
+    extra_origins = [
+        origin.strip()
+        for origin in os.environ.get("MEMORYVAULT_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=extra_origins,
+        allow_origin_regex=(
+            None if extra_origins else
+            r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
+        ),
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
     )
 
     def get_vault() -> Vault:
@@ -81,8 +95,15 @@ def create_app(
         roots: list[str] | None = None,
         v: Vault = Depends(get_vault),
     ):
-        """Run an incremental scan (default roots: configured watch paths)."""
+        """Run an incremental scan.
+
+        With no body, use configured watch paths or the directories recorded
+        by previous indexing runs — so re-scanning works for a vault created
+        with ``memoryvault index <dir>``.
+        """
         paths = [Path(r) for r in roots] if roots else None
+        if paths:
+            v.scanner.remember_roots(paths)
         result = v.scanner.scan(roots=paths)
         return ScanResponse(**result.to_dict())
 
@@ -220,7 +241,10 @@ def create_app(
         v: Vault = Depends(get_vault),
     ):
         events = v.repo.list_events(limit=limit, offset=offset, event_type=event_type)
-        return {"total": v.repo.count(include_deleted=True), "events": [e.to_dict() for e in events]}
+        return {
+            "total": v.repo.count_events(event_type=event_type),
+            "events": [e.to_dict() for e in events],
+        }
 
     # -------------------------------------------------------------- duplicates
     @app.get("/api/duplicates", response_model=DuplicatesResponse, tags=["duplicates"])
@@ -260,9 +284,21 @@ def _doc_out(doc: Document) -> DocumentOut:
 
 def _mount_frontend(app: FastAPI, dist: Path) -> None:
     """Serve the built React dashboard as static files (SPA fallback)."""
+    dist = dist.resolve()
     assets = dist / "assets"
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+    def _safe_static(relative: str) -> Path | None:
+        """Resolve *relative* inside *dist*, rejecting traversal attempts."""
+        if not relative or "\x00" in relative:
+            return None
+        try:
+            candidate = (dist / relative).resolve()
+            candidate.relative_to(dist)
+        except (ValueError, OSError):
+            return None
+        return candidate if candidate.is_file() else None
 
     @app.get("/", include_in_schema=False)
     def index():  # pragma: no cover - static passthrough
@@ -270,7 +306,11 @@ def _mount_frontend(app: FastAPI, dist: Path) -> None:
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):  # pragma: no cover - static passthrough
-        candidate = dist / full_path
-        if candidate.is_file():
+        # Unknown API routes must be JSON 404s, not the SPA shell (which used
+        # to make a typo look like a successful request).
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(404, "not found")
+        candidate = _safe_static(full_path)
+        if candidate is not None:
             return FileResponse(candidate)
         return FileResponse(dist / "index.html")

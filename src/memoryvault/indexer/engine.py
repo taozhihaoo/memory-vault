@@ -156,7 +156,7 @@ class IndexEngine:
         root_list = [Path(r).resolve() for r in roots]
         removed = 0
         for doc in self.repo.list_documents(limit=self.repo.count(), offset=0):
-            if not any(doc.path.startswith(r.as_posix()) for r in root_list):
+            if not any(self.repo.is_within(doc.path, r) for r in root_list):
                 continue
             if not Path(doc.path).exists():
                 self.repo.mark_deleted(doc.id)  # type: ignore[arg-type]

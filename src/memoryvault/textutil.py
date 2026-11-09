@@ -6,6 +6,7 @@ import re
 import unicodedata
 
 _WORD_RE = re.compile(r"\b[\w']+\b", re.UNICODE)
+_CJK_CHAR_RE = re.compile(r"[\u3400-\u9fff]")
 
 _FALLBACK_ENCODINGS = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
 
@@ -26,8 +27,14 @@ def decode_bytes(raw: bytes) -> str:
 
 
 def count_words(text: str) -> int:
-    """Deterministic word count (whitespace/punctuation independent)."""
-    return len(_WORD_RE.findall(text))
+    """Deterministic word count.
+
+    Space-delimited words are counted as usual; CJK characters are counted
+    individually because a whole Chinese sentence would otherwise be a
+    single "word" under ``\\b\\w+\\b``.
+    """
+    latin_part = _CJK_CHAR_RE.sub(" ", text)
+    return len(_WORD_RE.findall(latin_part)) + len(_CJK_CHAR_RE.findall(text))
 
 
 def normalize_whitespace(text: str) -> str:

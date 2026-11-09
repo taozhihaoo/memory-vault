@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from memoryvault.parser import supported_extensions
+
 DEFAULT_EXCLUDED_DIRS = {
     ".git", ".hg", ".svn", "__pycache__", "node_modules",
     ".venv", "venv", ".idea", ".vscode", ".memoryvault",
@@ -51,8 +53,12 @@ class VaultConfig:
     watch_paths: list[Path] = field(default_factory=list)
 
     #: File extensions that are indexed (without dot, lowercase).
-    extensions: frozenset[str] = frozenset(
-        {"txt", "md", "markdown", "pdf", "docx", "html", "htm", "json", "csv"}
+    #: Derived from the parser registry so a newly registered format is
+    #: indexable by default — previously this hard-coded list silently
+    #: dropped every format the registry supported (``.log``, ``.tsv``,
+    #: ``.text``), contradicting the documented format table.
+    extensions: frozenset[str] = field(
+        default_factory=lambda: frozenset(supported_extensions())
     )
 
     #: Directory names that are never entered during scanning.

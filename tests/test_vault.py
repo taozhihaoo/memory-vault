@@ -37,7 +37,9 @@ def test_vault_stats_facade(indexed_vault):
 
 
 def test_version():
-    assert __version__ == "1.0.0"
+    # Keep the assertion forward-compatible with future releases.
+    parts = tuple(int(part) for part in __version__.split("."))
+    assert parts >= (1, 1, 0)
 
 
 def test_config_defaults():

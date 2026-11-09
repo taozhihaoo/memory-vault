@@ -3,10 +3,17 @@
 * Safe user-query to MATCH-expression translation.
 * BM25 ranking (FTS5's built-in ``bm25()``).
 * Snippet and term highlighting via ``snippet()`` / ``highlight()``.
+
+Highlighting is HTML-safe: FTS5 inserts private sentinel characters around
+matches, the document text is then HTML-escaped, and only afterwards are the
+sentinels replaced with the requested (trusted) marker strings.  This closes
+a stored-XSS hole where document content such as ``<img onerror=...>`` used
+to be handed to ``dangerouslySetInnerHTML`` verbatim.
 """
 
 from __future__ import annotations
 
+import html
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -15,6 +22,11 @@ from typing import Any
 from memoryvault.database.repository import DocumentRepository
 
 _TOKEN_RE = re.compile(r'"[^"]*"|[^\s"]+')
+
+# Private, single-character markers. FTS5 never sees HTML and the raw
+# document text can never inject a tag: everything is escaped first.
+_HL_OPEN = "\x01"
+_HL_CLOSE = "\x02"
 
 
 @dataclass(slots=True)
@@ -62,30 +74,37 @@ def build_match_query(user_query: str) -> str | None:
         return None
 
     parts: list[str] = []
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
-        upper = token.upper()
-        if upper == "OR" and parts and i + 1 < len(tokens):
-            parts.append("OR")
-            i += 1
+    for i, token in enumerate(tokens):
+        if token.upper() == "OR":
+            # A dangling OR used to turn into a literal ``"or"*`` term and
+            # silently returned zero results. Only keep an operator that has
+            # a real operand on either side.
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+            if (
+                parts
+                and parts[-1] not in ("OR", "AND")
+                and nxt is not None
+                and nxt.upper() != "OR"
+                and not nxt.startswith("-")
+            ):
+                parts.append("OR")
             continue
         if token.startswith("-") and len(token) > 1:
             term = _term_to_match(token[1:], prefix=True)
             if term:
                 parts.append(f"NOT {term}")
-            i += 1
             continue
         term = _term_to_match(token, prefix=True)
         if term:
             if parts and parts[-1] != "OR":
                 parts.append("AND")
             parts.append(term)
-        i += 1
 
-    expression = " ".join(parts)
+    expression = " ".join(parts).strip()
+    # A NOT without a left-hand operand is invalid FTS5 syntax; the engine
+    # handles such "exclude only" queries with a dedicated SQL path.
     expression = re.sub(r"^(AND|OR)\s+|\s+(AND|OR)$", "", expression)
-    return expression if expression.strip() else None
+    return expression or None
 
 
 def _term_to_match(token: str, *, prefix: bool) -> str | None:
@@ -99,12 +118,27 @@ def _term_to_match(token: str, *, prefix: bool) -> str | None:
     return f'"{cleaned}"*' if prefix else f'"{cleaned}"'
 
 
+def _safe_highlight(raw: str | None, pre: str, post: str) -> str:
+    """Escape FTS output for HTML, then restore only the trusted markers."""
+    if raw is None:
+        return ""
+    escaped = html.escape(raw, quote=True)
+    return escaped.replace(_HL_OPEN, pre).replace(_HL_CLOSE, post)
+
+
+def _plain_snippet(raw: str | None, limit: int = 240) -> str:
+    """HTML-safe preview used when there is no FTS match to highlight."""
+    text = html.escape(raw or "", quote=True).replace("\n", " ")
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 class SearchEngine:
     """Runs FTS5 queries against the vault and shapes the results."""
 
     def __init__(self, repo: DocumentRepository) -> None:
         self.repo = repo
 
+    # ------------------------------------------------------------------ API
     def search(
         self,
         query: str,
@@ -116,13 +150,13 @@ class SearchEngine:
         highlight_pre: str = "<mark>",
         highlight_post: str = "</mark>",
     ) -> dict[str, Any]:
-        """Return ranked search results with snippets and total count."""
+        """Return ranked search results with HTML-safe snippets and total count."""
         match_expr = build_match_query(query)
         if not match_expr:
             return {"query": query, "total": 0, "results": []}
 
-        clauses = ["documents_fts MATCH :match"]
-        params: dict[str, Any] = {"match": match_expr}
+        clauses: list[str] = []
+        params: dict[str, Any] = {}
         if content_type:
             clauses.append("d.content_type = :ctype")
             params["ctype"] = content_type
@@ -132,18 +166,23 @@ class SearchEngine:
                 " JOIN tags t ON t.id = dt.tag_id WHERE t.name = :tag)"
             )
             params["tag"] = tag
-        where = " AND ".join(clauses)
+        filters = "".join(f" AND {c}" for c in clauses)
+
+        # ``-spam`` / ``-a -b``: FTS5's NOT is a binary operator and cannot
+        # start an expression. Handle it as a set difference instead of
+        # letting sqlite3.OperationalError escape as an HTTP 500.
+        if match_expr.startswith("NOT "):
+            return self._search_exclusions(
+                query, match_expr, limit=limit, offset=offset,
+                filters=filters, params=params,
+            )
 
         base_sql = f"""
             FROM documents_fts f
             JOIN documents d ON d.id = f.rowid
-            WHERE {where} AND d.deleted = 0
+            WHERE documents_fts MATCH :match AND d.deleted = 0{filters}
         """
-
-        count_row = self.repo.conn.execute(
-            f"SELECT COUNT(*) AS n {base_sql}", params
-        ).fetchone()
-        total = int(count_row["n"])
+        match_params = {**params, "match": match_expr}
 
         sql = f"""
             SELECT d.id, d.path, d.title, d.content_type, d.modified_at,
@@ -154,29 +193,98 @@ class SearchEngine:
             ORDER BY rank, d.modified_at DESC
             LIMIT :limit OFFSET :offset
         """
-        rows = self.repo.conn.execute(
-            sql, {**params, "pre": highlight_pre, "post": highlight_post,
-                  "limit": limit, "offset": offset}
-        ).fetchall()
+        try:
+            total = int(self.repo.conn.execute(
+                f"SELECT COUNT(*) AS n {base_sql}", match_params
+            ).fetchone()["n"])
+            rows = self.repo.conn.execute(
+                sql, {**match_params, "pre": _HL_OPEN, "post": _HL_CLOSE,
+                      "limit": limit, "offset": offset}
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            # Never surface a raw FTS5 syntax error as an HTTP 500. The
+            # grammar is deterministic, but hostile input should degrade to
+            # "no results" rather than an unhandled exception.
+            return {"query": query, "total": 0, "results": []}
 
-        results: list[SearchResult] = []
-        for row in rows:
-            # FTS5 ranks by descending relevance with *negative* bm25 values;
-            # negate so a bigger score is a better match for consumers.
-            results.append(
+        results = [
+            SearchResult(
+                document_id=row["id"],
+                path=row["path"],
+                title=row["title"],
+                snippet=_safe_highlight(row["snip"], highlight_pre, highlight_post),
+                title_highlighted=_safe_highlight(row["htitle"], highlight_pre, highlight_post),
+                # FTS5 ranks with *negative* bm25 values; negate so a bigger
+                # score is a better match for consumers.
+                score=-row["rank"],
+                content_type=row["content_type"],
+                modified_at=row["modified_at"],
+                tags=self.repo.tags_for(row["id"], source="tag"),
+            )
+            for row in rows
+        ]
+        return {"query": query, "total": total, "results": results}
+
+    # --------------------------------------------------------------- internal
+    def _search_exclusions(
+        self,
+        query: str,
+        match_expr: str,
+        *,
+        limit: int,
+        offset: int,
+        filters: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Answer queries made only of ``-term`` exclusions.
+
+        FTS5 has no "match everything" primitive, so we select documents
+        whose rowid is absent from the FTS results for the excluded terms.
+        """
+        # ``NOT`` clauses are space-separated, not AND-separated.
+        excluded_terms = re.findall(r'NOT ("[^"]*"\*?)', match_expr)
+        exclude_expr = " OR ".join(excluded_terms)
+        if not exclude_expr:
+            return {"query": query, "total": 0, "results": []}
+
+        where = f"d.deleted = 0{filters} AND d.id NOT IN (" \
+                "SELECT rowid FROM documents_fts WHERE documents_fts MATCH :exclude)"
+        query_params = {
+            **params, "exclude": exclude_expr, "limit": limit, "offset": offset
+        }
+        try:
+            total = int(self.repo.conn.execute(
+                f"SELECT COUNT(*) AS n FROM documents d WHERE {where}", query_params
+            ).fetchone()["n"])
+            rows = self.repo.conn.execute(
+                f"""SELECT d.id, d.path, d.title, d.content_type, d.modified_at,
+                           d.content, 0.0 AS rank
+                    FROM documents d WHERE {where}
+                    ORDER BY d.modified_at DESC NULLS LAST, d.id DESC
+                    LIMIT :limit OFFSET :offset""",
+                query_params,
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            return {"query": query, "total": 0, "results": []}
+
+        return {
+            "query": query,
+            "total": total,
+            "results": [
                 SearchResult(
                     document_id=row["id"],
                     path=row["path"],
                     title=row["title"],
-                    snippet=row["snip"],
-                    title_highlighted=row["htitle"],
-                    score=-row["rank"],
+                    snippet=_plain_snippet(row["content"]),
+                    title_highlighted=html.escape(row["title"], quote=True),
+                    score=0.0,
                     content_type=row["content_type"],
                     modified_at=row["modified_at"],
                     tags=self.repo.tags_for(row["id"], source="tag"),
                 )
-            )
-        return {"query": query, "total": total, "results": results}
+                for row in rows
+            ],
+        }
 
     def suggest(self, prefix: str, *, limit: int = 10) -> list[dict[str, Any]]:
         """Vocabulary terms starting with *prefix*, most frequent first."""

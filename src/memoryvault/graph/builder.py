@@ -96,20 +96,29 @@ class GraphBuilder:
         if include_similar:
             edges.extend(self._similarity_edges())
 
+        # ``_similarity_edges`` looks at the whole vault; with ``limit`` set
+        # it can reference documents that were truncated out of ``nodes``.
+        # Drop those dangling edges before computing degrees/metadata.
+        unique_edges = self._dedupe_edges(edges)
+        unique_edges = [
+            e for e in unique_edges
+            if e["source"] in nodes and e["target"] in nodes
+        ]
+
         # Degree counts for documents, used for graph layout sizing.
-        for edge in edges:
+        for edge in unique_edges:
             for endpoint in (edge["source"], edge["target"]):
-                if endpoint in nodes and nodes[endpoint]["kind"] == "document":
+                if nodes[endpoint]["kind"] == "document":
                     nodes[endpoint]["degree"] = nodes[endpoint].get("degree", 0) + 1
 
         return {
             "nodes": list(nodes.values()),
-            "edges": self._dedupe_edges(edges),
+            "edges": unique_edges,
             "meta": {
                 "document_count": len(documents),
                 "tag_count": len(tag_docs),
                 "topic_count": len(topic_docs),
-                "edge_count": len(edges),
+                "edge_count": len(unique_edges),
             },
         }
 

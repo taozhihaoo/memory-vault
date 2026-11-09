@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from pathlib import Path
 
@@ -33,6 +34,8 @@ class IncrementalScanner:
     without parsing.
     """
 
+    ROOTS_SETTING = "watch_roots"
+
     def __init__(
         self,
         repo: DocumentRepository,
@@ -43,10 +46,38 @@ class IncrementalScanner:
         self.engine = engine
         self.config = config or engine.config
 
+    # ------------------------------------------------------------- watch roots
+    def remembered_roots(self) -> list[Path]:
+        """Directories indexed previously, persisted in the vault itself."""
+        raw = self.repo.get_setting(self.ROOTS_SETTING)
+        if not raw:
+            return []
+        try:
+            paths = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        return [Path(p) for p in paths if isinstance(p, str)]
+
+    def remember_roots(self, roots) -> None:
+        """Record directories so a later root-less scan knows what to refresh."""
+        known = [self.repo.normalize_path(p) for p in self.remembered_roots()]
+        for root in roots or []:
+            normalized = self.repo.normalize_path(root)
+            if normalized not in known:
+                known.append(normalized)
+        if known:
+            self.repo.set_setting(self.ROOTS_SETTING, json.dumps(known[:100]))
+
     def scan(self, roots: list[Path] | Path | None = None) -> IndexStats:
-        """Synchronize the database with the file system under *roots*."""
+        """Synchronize the database with the file system under *roots*.
+
+        With no roots, use the configured watch paths and fall back to the
+        directories recorded by previous indexing runs. This makes the
+        dashboard's "Re-scan vault" button work after ``memoryvault index``
+        without requiring a watcher config.
+        """
         if roots is None:
-            roots = list(self.config.watch_paths)
+            roots = list(self.config.watch_paths) or self.remembered_roots()
         if isinstance(roots, (str, Path)):
             roots = [Path(roots)]
         roots = [Path(r) for r in roots]
@@ -83,12 +114,10 @@ class IncrementalScanner:
 
     def _remove_vanished(self, roots: list[Path], seen: set[str]) -> int:
         """Mark documents deleted whose files disappeared from *roots*."""
-        root_prefixes = [
-            Path(r).resolve().as_posix() for r in roots if Path(r).exists()
-        ]
+        root_prefixes = [Path(r).resolve() for r in roots if Path(r).exists()]
         removed = 0
         for doc in self.repo.list_documents(limit=self.repo.count(), offset=0):
-            in_roots = any(doc.path.startswith(prefix) for prefix in root_prefixes)
+            in_roots = any(self.repo.is_within(doc.path, prefix) for prefix in root_prefixes)
             if in_roots and doc.path not in seen:
                 self.repo.mark_deleted(doc.id)  # type: ignore[arg-type]
                 removed += 1

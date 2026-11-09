@@ -50,7 +50,10 @@ class Vault:
     # -------------------------------------------------------------- operations
     def index(self, root: str | Path) -> IndexStats:
         """Index a directory tree (thin wrapper over :attr:`engine`)."""
-        return self.engine.index_directory(Path(root))
+        root = Path(root)
+        stats = self.engine.index_directory(root)
+        self.scanner.remember_roots([root])
+        return stats
 
     def stats(self) -> dict:
         return self.repo.stats()
